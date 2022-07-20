@@ -140,8 +140,16 @@ func resourceMongoDBAtlasTeamUpdate(ctx context.Context, d *schema.ResourceData,
 	}
 
 	if d.HasChange("usernames") {
-		// First, we need to remove the current users of the team and later add the new users
+		// First, we need to remove the users of the team selectively and later add the new users
 		// Get the current team's users
+
+		oldUsers, newUsersToAdd := d.GetChange("usernames")
+		oldSet := oldUsers.(*schema.Set)
+		newSet := newUsersToAdd.(*schema.Set)
+
+		remove := oldSet.Difference(newSet).List()
+		add := newSet.Difference(oldSet).List()
+
 		users, _, err := conn.Teams.GetTeamUsersAssigned(ctx, orgID, teamID)
 
 		if err != nil {
@@ -150,17 +158,18 @@ func resourceMongoDBAtlasTeamUpdate(ctx context.Context, d *schema.ResourceData,
 
 		// Removing each user - Let's not modify the state before making sure we can continue
 
-		// existig users
+		// existing users
 		index := make(map[string]matlas.AtlasUser)
 		for i := range users {
 			index[users[i].Username] = users[i]
 		}
 
 		cleanUsers := func() error {
-			for i := range users {
-				_, err := conn.Teams.RemoveUserToTeam(ctx, orgID, teamID, users[i].ID)
-				if err != nil {
-					return fmt.Errorf("error deleting Atlas User (%s) information: %s", teamID, err)
+			if len(remove) > 0 {
+				for i := range remove {
+					if _, err := conn.Teams.RemoveUserToTeam(ctx, orgID, teamID, users[i].ID); err != nil {
+						return fmt.Errorf("error deleting Atlas User (%s) information: %s", teamID, err)
+					}
 				}
 			}
 			return nil
@@ -168,18 +177,18 @@ func resourceMongoDBAtlasTeamUpdate(ctx context.Context, d *schema.ResourceData,
 
 		// existing users
 
-		// Verify if the gave users exists
+		// Verify if the new user exists
 		var newUsers []string
 
-		for _, username := range d.Get("usernames").(*schema.Set).List() {
+		for _, username := range add {
 			user, _, err := conn.AtlasUsers.GetByName(ctx, username.(string))
 
 			updatedUserData := user
 
 			if err != nil {
-				// this must be handle as a soft error
+				// this must be handled as a soft error
 				if !strings.Contains(err.Error(), "401") {
-					// In this case is a hard error doing a rollback from the initial operation
+					// In this case this is a hard error do a rollback from the initial operation
 					return diag.FromErr(fmt.Errorf("error getting Atlas User (%s) information: %s", username, err))
 				}
 
@@ -196,7 +205,7 @@ func resourceMongoDBAtlasTeamUpdate(ctx context.Context, d *schema.ResourceData,
 					updatedUserData = &cached
 				}
 			}
-			// if the user exists, we will storage its teamID
+			// if the user exists, we will store its teamID
 			newUsers = append(newUsers, updatedUserData.ID)
 		}
 
@@ -205,10 +214,11 @@ func resourceMongoDBAtlasTeamUpdate(ctx context.Context, d *schema.ResourceData,
 		if err != nil {
 			return diag.FromErr(err)
 		}
-
-		_, _, err = conn.Teams.AddUsersToTeam(ctx, orgID, teamID, newUsers)
-		if err != nil {
-			return diag.FromErr(fmt.Errorf(errorTeamAddUsers, err))
+		if len(add) > 0 {
+			_, _, err = conn.Teams.AddUsersToTeam(ctx, orgID, teamID, newUsers)
+			if err != nil {
+				return diag.FromErr(fmt.Errorf(errorTeamAddUsers, err))
+			}
 		}
 	}
 
